@@ -6,6 +6,7 @@ import {
   ChartLabels,
   ChartType,
   DataSource,
+  DataMapping,
   ExecutionResult,
   NormalizationConfig,
   SourceType,
@@ -15,8 +16,10 @@ import {
   detectNumericFields,
   detectTimeField,
   extractJsonRows,
+  getNumericColumns,
   normalizeRows,
   parseCsv,
+  parseTimestamp,
   summaryStats,
   toCsv,
 } from './utils/data';
@@ -42,9 +45,22 @@ const defaultChartConfig: ChartConfig = {
   type: 'line',
   line: { smooth: false, markers: true, dash: 'solid' },
   area: { stacked: false, opacity: 0.6 },
-  bar: { stacked: false, orientation: 'v' },
+  bar: { mode: 'group', orientation: 'v' },
   scatter: { markerSize: 8 },
   treemap: { labelField: '', valueField: '', groupField: '' },
+  pie: { hole: 0.4 },
+};
+
+const defaultDataMapping: DataMapping = {
+  xField: '',
+  yField: '',
+  groupField: '',
+  aggregation: 'sum',
+  sortBy: 'none',
+  topN: 0,
+  otherLabel: 'Other',
+  filterField: '',
+  filterValue: '',
 };
 
 const defaultNormalization = (rows: Record<string, unknown>[]): NormalizationConfig => {
@@ -123,6 +139,7 @@ const App = () => {
   const [adapterType, setAdapterType] = useState<SourceType>('csv');
   const [chartLabels, setChartLabels] = useState<ChartLabels>(defaultChartLabels);
   const [chartConfig, setChartConfig] = useState<ChartConfig>(defaultChartConfig);
+  const [dataMapping, setDataMapping] = useState<DataMapping>(defaultDataMapping);
   const [showApiKey, setShowApiKey] = useState(false);
 
   const [httpConfig, setHttpConfig] = useState({
@@ -177,13 +194,20 @@ const App = () => {
     return (activeSource.config.datasetName as string) || '';
   }, [activeSource]);
 
+  const isMappingActive =
+    !!dataMapping.xField &&
+    !!dataMapping.yField &&
+    ['line', 'area', 'bar', 'scatter', 'pie'].includes(chartConfig.type);
+
   const resolvedTitle = chartLabels.title || datasetName || 'Untitled chart';
-  const resolvedXLabel = chartLabels.xLabel || normalization.timeField || 'Time';
+  const resolvedXLabel =
+    chartLabels.xLabel || (isMappingActive ? dataMapping.xField : normalization.timeField) || 'Time';
   const resolvedYLabel = useMemo(() => {
     if (chartLabels.yLabel) return chartLabels.yLabel;
+    if (isMappingActive) return dataMapping.yField || 'Value';
     const activeKeys = seriesKeys.filter((key) => visibleSeries[key]);
     return activeKeys.length === 1 ? activeKeys[0] : 'Value';
-  }, [chartLabels.yLabel, seriesKeys, visibleSeries]);
+  }, [chartLabels.yLabel, dataMapping.yField, isMappingActive, seriesKeys, visibleSeries]);
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
@@ -234,6 +258,7 @@ const App = () => {
     const config = activeSource.config;
     if (config.httpConfig) setHttpConfig(config.httpConfig as typeof httpConfig);
     if (config.csvUrl) setCsvUrl(config.csvUrl as string);
+    if (config.dataMapping) setDataMapping(config.dataMapping as DataMapping);
     if (config.duneConfig) {
       const stored = config.duneConfig as typeof duneConfig;
       const storedKey = stored.queryId ? getStoredDuneKey(stored.queryId) : null;
@@ -255,15 +280,170 @@ const App = () => {
     }
   }, [duneConfig]);
 
+  const mappedRows = useMemo(() => {
+    if (!rawRows.length) return [] as Record<string, unknown>[];
+    if (!dataMapping.filterField || !dataMapping.filterValue) return rawRows;
+    const needle = dataMapping.filterValue.toLowerCase();
+    return rawRows.filter((row) =>
+      String(row[dataMapping.filterField] ?? '')
+        .toLowerCase()
+        .includes(needle)
+    );
+  }, [dataMapping.filterField, dataMapping.filterValue, rawRows]);
+
+  const numericColumns = useMemo(() => getNumericColumns(rawRows), [rawRows]);
+
+  const aggregateValues = (values: number[], method: DataMapping['aggregation'], count: number) => {
+    if (!values.length) return method === 'count' ? count : 0;
+    switch (method) {
+      case 'avg':
+        return values.reduce((sum, value) => sum + value, 0) / values.length;
+      case 'min':
+        return Math.min(...values);
+      case 'max':
+        return Math.max(...values);
+      case 'count':
+        return count;
+      case 'last':
+        return values[values.length - 1];
+      case 'sum':
+      default:
+        return values.reduce((sum, value) => sum + value, 0);
+    }
+  };
+
+  const mappingAggregation = useMemo(() => {
+    if (!isMappingActive) {
+      return { xValues: [], series: [] as { name: string; values: number[] }[] };
+    }
+    const buckets = new Map<
+      string,
+      Map<string, { values: number[]; count: number; last: number | null }>
+    >();
+    mappedRows.forEach((row) => {
+      const xRaw = row[dataMapping.xField];
+      const xKey = String(xRaw ?? '');
+      if (!xKey) return;
+      const groupKey = dataMapping.groupField
+        ? String(row[dataMapping.groupField] ?? 'Unassigned')
+        : 'Series';
+      const valueRaw = row[dataMapping.yField];
+      const value = Number(valueRaw);
+      if (Number.isNaN(value) && dataMapping.aggregation !== 'count') return;
+      const groupBuckets = buckets.get(groupKey) ?? new Map();
+      const bucket = groupBuckets.get(xKey) ?? { values: [], count: 0, last: null };
+      bucket.count += 1;
+      if (!Number.isNaN(value)) {
+        bucket.values.push(value);
+        bucket.last = value;
+      }
+      groupBuckets.set(xKey, bucket);
+      buckets.set(groupKey, groupBuckets);
+    });
+
+    const xValues = Array.from(
+      new Set(Array.from(buckets.values()).flatMap((group) => Array.from(group.keys())))
+    );
+
+    const sortBy = dataMapping.sortBy;
+    if (sortBy === 'x') {
+      xValues.sort((a, b) => {
+        const dateA = parseTimestamp(a);
+        const dateB = parseTimestamp(b);
+        if (dateA && dateB) return dateA.getTime() - dateB.getTime();
+        return a.localeCompare(b);
+      });
+    }
+    if (sortBy === 'value-desc') {
+      const totals = new Map<string, number>();
+      xValues.forEach((x) => {
+        let total = 0;
+        buckets.forEach((group) => {
+          const bucket = group.get(x);
+          if (!bucket) return;
+          total += aggregateValues(bucket.values, dataMapping.aggregation, bucket.count);
+        });
+        totals.set(x, total);
+      });
+      xValues.sort((a, b) => (totals.get(b) ?? 0) - (totals.get(a) ?? 0));
+    }
+
+    const series = Array.from(buckets.entries()).map(([name, group]) => ({
+      name,
+      values: xValues.map((x) => {
+        const bucket = group.get(x);
+        if (!bucket) return 0;
+        const value =
+          dataMapping.aggregation === 'last' && bucket.last !== null
+            ? bucket.last
+            : aggregateValues(bucket.values, dataMapping.aggregation, bucket.count);
+        return value;
+      }),
+    }));
+
+    return { xValues, series };
+  }, [dataMapping, isMappingActive, mappedRows]);
+
+  const pieAggregation = useMemo(() => {
+    if (!isMappingActive || chartConfig.type !== 'pie') {
+      return { labels: [], values: [] as number[] };
+    }
+    const buckets = new Map<string, { values: number[]; count: number; last: number | null }>();
+    mappedRows.forEach((row) => {
+      const label = String(row[dataMapping.xField] ?? '');
+      if (!label) return;
+      const value = Number(row[dataMapping.yField]);
+      if (Number.isNaN(value) && dataMapping.aggregation !== 'count') return;
+      const bucket = buckets.get(label) ?? { values: [], count: 0, last: null };
+      bucket.count += 1;
+      if (!Number.isNaN(value)) {
+        bucket.values.push(value);
+        bucket.last = value;
+      }
+      buckets.set(label, bucket);
+    });
+    const entries = Array.from(buckets.entries()).map(([label, bucket]) => ({
+      label,
+      value:
+        dataMapping.aggregation === 'last' && bucket.last !== null
+          ? bucket.last
+          : aggregateValues(bucket.values, dataMapping.aggregation, bucket.count),
+    }));
+    entries.sort((a, b) => b.value - a.value);
+    if (dataMapping.topN > 0 && entries.length > dataMapping.topN) {
+      const kept = entries.slice(0, dataMapping.topN);
+      const rest = entries.slice(dataMapping.topN);
+      const otherValue = rest.reduce((sum, entry) => sum + entry.value, 0);
+      return {
+        labels: [...kept.map((entry) => entry.label), dataMapping.otherLabel || 'Other'],
+        values: [...kept.map((entry) => entry.value), otherValue],
+      };
+    }
+    return {
+      labels: entries.map((entry) => entry.label),
+      values: entries.map((entry) => entry.value),
+    };
+  }, [chartConfig.type, dataMapping, isMappingActive, mappedRows]);
+
   useEffect(() => {
     if (!plotRef.current) return;
     const visibleKeys = seriesKeys.filter((key) => visibleSeries[key]);
     const isTreemap = chartConfig.type === 'treemap';
-    const showRangeSlider = !isTreemap;
+    const isPie = chartConfig.type === 'pie';
+    const showRangeSlider = !isTreemap && !isPie && !isMappingActive;
 
     const traces: Plotly.Data[] = [];
 
-    if (isTreemap) {
+    if (isPie) {
+      if (dataMapping.xField && dataMapping.yField) {
+        traces.push({
+          type: 'pie',
+          labels: pieAggregation.labels,
+          values: pieAggregation.values,
+          hole: chartConfig.pie.hole,
+        });
+      }
+    } else if (isTreemap) {
       const { labelField, valueField, groupField } = chartConfig.treemap;
       if (labelField && valueField) {
         const labels: string[] = [];
@@ -302,6 +482,70 @@ const App = () => {
           textinfo: 'label+value',
         });
       }
+    } else if (isMappingActive) {
+      mappingAggregation.series.forEach((series, index) => {
+        const xValues = mappingAggregation.xValues;
+        const yValues = series.values;
+        const baseTrace = {
+          name: series.name,
+          marker: { color: seriesColorPalette[index % seriesColorPalette.length] },
+        };
+
+        if (chartConfig.type === 'line') {
+          traces.push({
+            ...baseTrace,
+            type: 'scatter',
+            mode: chartConfig.line.markers ? 'lines+markers' : 'lines',
+            x: xValues,
+            y: yValues,
+            line: {
+              color: seriesColorPalette[index % seriesColorPalette.length],
+              shape: chartConfig.line.smooth ? 'spline' : 'linear',
+              dash: chartConfig.line.dash,
+            },
+          });
+        }
+
+        if (chartConfig.type === 'area') {
+          traces.push({
+            ...baseTrace,
+            type: 'scatter',
+            mode: 'lines',
+            x: xValues,
+            y: yValues,
+            fill: chartConfig.area.stacked && index > 0 ? 'tonexty' : 'tozeroy',
+            stackgroup: chartConfig.area.stacked ? 'stack' : undefined,
+            line: {
+              color: seriesColorPalette[index % seriesColorPalette.length],
+            },
+            opacity: chartConfig.area.opacity,
+          });
+        }
+
+        if (chartConfig.type === 'bar') {
+          traces.push({
+            ...baseTrace,
+            type: 'bar',
+            orientation: chartConfig.bar.orientation,
+            x: chartConfig.bar.orientation === 'h' ? yValues : xValues,
+            y: chartConfig.bar.orientation === 'h' ? xValues : yValues,
+          });
+        }
+
+        if (chartConfig.type === 'scatter') {
+          traces.push({
+            ...baseTrace,
+            type: 'scatter',
+            mode: 'markers',
+            x: xValues,
+            y: yValues,
+            marker: {
+              size: chartConfig.scatter.markerSize,
+              color: seriesColorPalette[index % seriesColorPalette.length],
+            },
+          });
+        }
+      });
     } else {
       visibleKeys.forEach((key, index) => {
         const xValues = filteredRows.map((row) => row.timestamp);
@@ -380,11 +624,14 @@ const App = () => {
       font: { color: text },
       title: { text: resolvedTitle, font: { color: text } },
       margin: { l: 50, r: 30, t: 50, b: 50 },
-      barmode: chartConfig.type === 'bar' && chartConfig.bar.stacked ? 'stack' : undefined,
+      barmode: chartConfig.type === 'bar' ? chartConfig.bar.mode : undefined,
       xaxis: {
         title: { text: resolvedXLabel },
         rangeslider: { visible: showRangeSlider },
-        range: timeRange ? [new Date(timeRange[0]), new Date(timeRange[1])] : undefined,
+        range:
+          !isMappingActive && timeRange
+            ? [new Date(timeRange[0]), new Date(timeRange[1])]
+            : undefined,
         color: text,
         gridcolor: grid,
         zerolinecolor: grid,
@@ -414,7 +661,7 @@ const App = () => {
         : [],
     };
 
-    if (isTreemap) {
+    if (isTreemap || isPie) {
       layout.xaxis = undefined;
       layout.yaxis = undefined;
     }
@@ -432,8 +679,12 @@ const App = () => {
     }
   }, [
     chartConfig,
+    dataMapping,
     filteredRows,
+    isMappingActive,
+    mappingAggregation,
     normalization.timeField,
+    pieAggregation,
     resolvedTitle,
     resolvedXLabel,
     resolvedYLabel,
@@ -484,6 +735,7 @@ const App = () => {
           apiKey: '',
         },
         datasetName: datasetNameValue,
+        dataMapping,
         chartLabels,
         chartConfig,
       },
@@ -747,6 +999,12 @@ const App = () => {
     persistActiveSourceConfig({ chartConfig: updated });
   };
 
+  const handleMappingChange = (updates: Partial<DataMapping>) => {
+    const updated = { ...dataMapping, ...updates };
+    setDataMapping(updated);
+    persistActiveSourceConfig({ dataMapping: updated });
+  };
+
   const forgetDuneKey = () => {
     if (!duneConfig.queryId) return;
     removeStoredDuneKey(duneConfig.queryId);
@@ -758,6 +1016,8 @@ const App = () => {
   const treemapAvailable = chartConfig.type === 'treemap';
   const treemapReady =
     treemapAvailable && chartConfig.treemap.labelField && chartConfig.treemap.valueField;
+  const pieReady =
+    chartConfig.type === 'pie' && dataMapping.xField && dataMapping.yField;
 
   return (
     <div className="min-h-screen p-6">
@@ -1104,6 +1364,11 @@ const App = () => {
                 Select label and value fields in the Chart Settings panel to render the treemap.
               </div>
             )}
+            {chartConfig.type === 'pie' && !pieReady && (
+              <div className="mt-4 rounded-md border border-dashed border-slate-300 p-4 text-sm text-slate-500">
+                Select label and value fields in Data Mapping to render the pie or donut chart.
+              </div>
+            )}
             <div className="mt-4 h-[500px]" ref={plotRef} />
             {!canonicalRows.length && (
               <div className="mt-4 rounded-md border border-dashed border-slate-300 p-4 text-center text-sm text-slate-500">
@@ -1162,6 +1427,141 @@ const App = () => {
             </div>
 
             <div className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-700">
+              <h3 className="text-sm font-semibold">Data Mapping</h3>
+              <p className="mt-1 text-xs text-slate-500">
+                Map categorical data for grouped charts and pies (optional).
+              </p>
+              <div className="mt-2 space-y-2 text-xs">
+                <label className="block">X / Label field</label>
+                <select
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  value={dataMapping.xField}
+                  onChange={(event) => handleMappingChange({ xField: event.target.value })}
+                >
+                  <option value="">Auto-detect</option>
+                  {columns.map((col) => (
+                    <option key={col} value={col}>
+                      {col}
+                    </option>
+                  ))}
+                </select>
+                <label className="block">Y / Value field</label>
+                <select
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  value={dataMapping.yField}
+                  onChange={(event) => handleMappingChange({ yField: event.target.value })}
+                >
+                  <option value="">Auto-detect</option>
+                  {numericColumns.map((col) => (
+                    <option key={col} value={col}>
+                      {col}
+                    </option>
+                  ))}
+                </select>
+                <label className="block">Group / Series field (optional)</label>
+                <select
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  value={dataMapping.groupField}
+                  onChange={(event) => handleMappingChange({ groupField: event.target.value })}
+                >
+                  <option value="">None</option>
+                  {columns.map((col) => (
+                    <option key={col} value={col}>
+                      {col}
+                    </option>
+                  ))}
+                </select>
+                <label className="block">Aggregation</label>
+                <select
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  value={dataMapping.aggregation}
+                  onChange={(event) =>
+                    handleMappingChange({
+                      aggregation: event.target.value as DataMapping['aggregation'],
+                    })
+                  }
+                >
+                  {['sum', 'avg', 'min', 'max', 'count', 'last'].map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block">Sort</label>
+                    <select
+                      className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                      value={dataMapping.sortBy}
+                      onChange={(event) =>
+                        handleMappingChange({
+                          sortBy: event.target.value as DataMapping['sortBy'],
+                        })
+                      }
+                    >
+                      <option value="none">None</option>
+                      <option value="x">X</option>
+                      <option value="value-desc">Value desc</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block">Top N (pie)</label>
+                    <input
+                      className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                      type="number"
+                      min={0}
+                      value={dataMapping.topN}
+                      onChange={(event) =>
+                        handleMappingChange({ topN: Number(event.target.value) })
+                      }
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block">Filter field</label>
+                    <select
+                      className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                      value={dataMapping.filterField}
+                      onChange={(event) =>
+                        handleMappingChange({ filterField: event.target.value })
+                      }
+                    >
+                      <option value="">None</option>
+                      {columns.map((col) => (
+                        <option key={col} value={col}>
+                          {col}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block">Filter value</label>
+                    <input
+                      className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                      value={dataMapping.filterValue}
+                      onChange={(event) =>
+                        handleMappingChange({ filterValue: event.target.value })
+                      }
+                    />
+                  </div>
+                </div>
+                {dataMapping.topN > 0 && chartConfig.type === 'pie' && (
+                  <div>
+                    <label className="block">Other label</label>
+                    <input
+                      className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                      value={dataMapping.otherLabel}
+                      onChange={(event) =>
+                        handleMappingChange({ otherLabel: event.target.value })
+                      }
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-700">
               <h3 className="text-sm font-semibold">Chart Settings</h3>
               <div className="mt-2 space-y-2 text-xs">
                 <input
@@ -1195,7 +1595,7 @@ const App = () => {
                     handleChartConfigChange({ type: event.target.value as ChartType })
                   }
                 >
-                  {['line', 'area', 'bar', 'scatter', 'treemap'].map((type) => (
+                  {['line', 'area', 'bar', 'scatter', 'treemap', 'pie'].map((type) => (
                     <option key={type} value={type}>
                       {type}
                     </option>
@@ -1278,18 +1678,22 @@ const App = () => {
               )}
               {chartConfig.type === 'bar' && (
                 <div className="mt-3 space-y-2 text-xs">
-                  <label className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={chartConfig.bar.stacked}
-                      onChange={(event) =>
-                        handleChartConfigChange({
-                          bar: { ...chartConfig.bar, stacked: event.target.checked },
-                        })
-                      }
-                    />
-                    Stacked bars
-                  </label>
+                  <label className="block">Bar mode</label>
+                  <select
+                    className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                    value={chartConfig.bar.mode}
+                    onChange={(event) =>
+                      handleChartConfigChange({
+                        bar: {
+                          ...chartConfig.bar,
+                          mode: event.target.value as ChartConfig['bar']['mode'],
+                        },
+                      })
+                    }
+                  >
+                    <option value="group">Grouped</option>
+                    <option value="stack">Stacked</option>
+                  </select>
                   <label className="block">Orientation</label>
                   <select
                     className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
@@ -1391,6 +1795,24 @@ const App = () => {
                       </option>
                     ))}
                   </select>
+                </div>
+              )}
+              {chartConfig.type === 'pie' && (
+                <div className="mt-3 space-y-2 text-xs">
+                  <label className="block">Donut hole</label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={0.7}
+                    step={0.05}
+                    value={chartConfig.pie.hole}
+                    onChange={(event) =>
+                      handleChartConfigChange({
+                        pie: { ...chartConfig.pie, hole: Number(event.target.value) },
+                      })
+                    }
+                    className="w-full"
+                  />
                 </div>
               )}
             </div>

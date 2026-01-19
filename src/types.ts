@@ -34,7 +34,7 @@ export interface WatermarkConfig {
   position: 'center' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 }
 
-export type ChartType = 'line' | 'area' | 'bar' | 'scatter' | 'treemap';
+export type ChartType = 'line' | 'area' | 'bar' | 'scatter' | 'treemap' | 'pie';
 
 export interface ChartLabels {
   title: string;
@@ -54,7 +54,7 @@ export interface ChartConfig {
     opacity: number;
   };
   bar: {
-    stacked: boolean;
+    mode: 'group' | 'stack';
     orientation: 'v' | 'h';
   };
   scatter: {
@@ -65,4 +65,21 @@ export interface ChartConfig {
     valueField: string;
     groupField: string;
   };
+  pie: {
+    hole: number;
+  };
+}
+
+export type Aggregation = 'sum' | 'avg' | 'min' | 'max' | 'count' | 'last';
+
+export interface DataMapping {
+  xField: string;
+  yField: string;
+  groupField: string;
+  aggregation: Aggregation;
+  sortBy: 'none' | 'x' | 'value-desc';
+  topN: number;
+  otherLabel: string;
+  filterField: string;
+  filterValue: string;
 }

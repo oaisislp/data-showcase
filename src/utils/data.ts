@@ -120,3 +120,14 @@ export const summaryStats = (rows: CanonicalRow[]) => {
   const max = Math.max(...timestamps);
   return { rowCount: rows.length, start: new Date(min), end: new Date(max) };
 };
+
+export const getNumericColumns = (rows: Record<string, unknown>[]) => {
+  if (!rows.length) return [];
+  const keys = Object.keys(rows[0]);
+  return keys.filter((key) =>
+    rows.some((row) => {
+      const value = row[key];
+      return value !== null && value !== undefined && !Number.isNaN(Number(value));
+    })
+  );
+};
