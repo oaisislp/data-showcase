@@ -77,6 +77,9 @@ export interface DataMapping {
   yField: string;
   groupField: string;
   aggregation: Aggregation;
+  timeGranularity: 'day' | 'week' | 'month';
+  valueMode: 'absolute' | 'percent';
+  stackTo100: boolean;
   sortBy: 'none' | 'x' | 'value-desc';
   topN: number;
   otherLabel: string;

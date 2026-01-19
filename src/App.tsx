@@ -56,6 +56,9 @@ const defaultDataMapping: DataMapping = {
   yField: '',
   groupField: '',
   aggregation: 'sum',
+  timeGranularity: 'day',
+  valueMode: 'absolute',
+  stackTo100: false,
   sortBy: 'none',
   topN: 0,
   otherLabel: 'Other',
@@ -172,6 +175,18 @@ const App = () => {
   const activeSource = sources.find((source) => source.id === activeSourceId) ?? null;
 
   const stats = useMemo(() => summaryStats(canonicalRows), [canonicalRows]);
+  const mappingStats = useMemo(() => {
+    if (!isMappingTimeField) return stats;
+    const timestamps = rawRows
+      .map((row) => parseTimestamp(row[dataMapping.xField])?.getTime())
+      .filter((value): value is number => value !== undefined && value !== null);
+    if (!timestamps.length) {
+      return { rowCount: rawRows.length, start: null, end: null };
+    }
+    const min = Math.min(...timestamps);
+    const max = Math.max(...timestamps);
+    return { rowCount: rawRows.length, start: new Date(min), end: new Date(max) };
+  }, [dataMapping.xField, isMappingTimeField, rawRows, stats]);
 
   const seriesKeys = useMemo(() => {
     const keys = new Set<string>();
@@ -194,11 +209,19 @@ const App = () => {
     return (activeSource.config.datasetName as string) || '';
   }, [activeSource]);
 
+  const isTimeField = (field: string) => {
+    if (!field) return false;
+    return rawRows.some((row) => parseTimestamp(row[field]) !== null);
+  };
+
   const isMappingActive =
     !!dataMapping.xField &&
     !!dataMapping.yField &&
     ['line', 'area', 'bar', 'scatter', 'pie'].includes(chartConfig.type);
 
+  const isMappingTimeField = isMappingActive && isTimeField(dataMapping.xField);
+
+  const activeStats = isMappingTimeField ? mappingStats : stats;
   const resolvedTitle = chartLabels.title || datasetName || 'Untitled chart';
   const resolvedXLabel =
     chartLabels.xLabel || (isMappingActive ? dataMapping.xField : normalization.timeField) || 'Time';
@@ -243,6 +266,7 @@ const App = () => {
   }, [rawRows, normalization]);
 
   useEffect(() => {
+    if (isMappingTimeField) return;
     if (!canonicalRows.length) {
       setTimeRange(null);
       return;
@@ -251,7 +275,18 @@ const App = () => {
     const min = Math.min(...times);
     const max = Math.max(...times);
     setTimeRange([min, max]);
-  }, [canonicalRows]);
+  }, [canonicalRows, isMappingTimeField]);
+
+  useEffect(() => {
+    if (!isMappingTimeField) return;
+    const times = rawRows
+      .map((row) => parseTimestamp(row[dataMapping.xField])?.getTime())
+      .filter((value): value is number => value !== undefined && value !== null);
+    if (!times.length) return;
+    const min = Math.min(...times);
+    const max = Math.max(...times);
+    setTimeRange([min, max]);
+  }, [dataMapping.xField, isMappingTimeField, rawRows]);
 
   useEffect(() => {
     if (!activeSource) return;
@@ -282,14 +317,30 @@ const App = () => {
 
   const mappedRows = useMemo(() => {
     if (!rawRows.length) return [] as Record<string, unknown>[];
-    if (!dataMapping.filterField || !dataMapping.filterValue) return rawRows;
+    let rows = rawRows;
+    if (isMappingTimeField && timeRange) {
+      rows = rows.filter((row) => {
+        const timestamp = parseTimestamp(row[dataMapping.xField]);
+        if (!timestamp) return false;
+        const ts = timestamp.getTime();
+        return ts >= timeRange[0] && ts <= timeRange[1];
+      });
+    }
+    if (!dataMapping.filterField || !dataMapping.filterValue) return rows;
     const needle = dataMapping.filterValue.toLowerCase();
-    return rawRows.filter((row) =>
+    return rows.filter((row) =>
       String(row[dataMapping.filterField] ?? '')
         .toLowerCase()
         .includes(needle)
     );
-  }, [dataMapping.filterField, dataMapping.filterValue, rawRows]);
+  }, [
+    dataMapping.filterField,
+    dataMapping.filterValue,
+    dataMapping.xField,
+    isMappingTimeField,
+    rawRows,
+    timeRange,
+  ]);
 
   const numericColumns = useMemo(() => getNumericColumns(rawRows), [rawRows]);
 
@@ -312,6 +363,19 @@ const App = () => {
     }
   };
 
+  const getTimeBucketStart = (date: Date, granularity: DataMapping['timeGranularity']) => {
+    const bucket = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+    if (granularity === 'month') {
+      return new Date(Date.UTC(bucket.getUTCFullYear(), bucket.getUTCMonth(), 1));
+    }
+    if (granularity === 'week') {
+      const day = bucket.getUTCDay() || 7;
+      bucket.setUTCDate(bucket.getUTCDate() - day + 1);
+      return bucket;
+    }
+    return bucket;
+  };
+
   const mappingAggregation = useMemo(() => {
     if (!isMappingActive) {
       return { xValues: [], series: [] as { name: string; values: number[] }[] };
@@ -322,8 +386,14 @@ const App = () => {
     >();
     mappedRows.forEach((row) => {
       const xRaw = row[dataMapping.xField];
-      const xKey = String(xRaw ?? '');
+      let xKey = String(xRaw ?? '');
       if (!xKey) return;
+      if (isMappingTimeField) {
+        const timestamp = parseTimestamp(xRaw);
+        if (!timestamp) return;
+        const bucketStart = getTimeBucketStart(timestamp, dataMapping.timeGranularity);
+        xKey = bucketStart.toISOString();
+      }
       const groupKey = dataMapping.groupField
         ? String(row[dataMapping.groupField] ?? 'Unassigned')
         : 'Series';
@@ -341,13 +411,16 @@ const App = () => {
       buckets.set(groupKey, groupBuckets);
     });
 
-    const xValues = Array.from(
+    const xKeys = Array.from(
       new Set(Array.from(buckets.values()).flatMap((group) => Array.from(group.keys())))
     );
 
     const sortBy = dataMapping.sortBy;
-    if (sortBy === 'x') {
-      xValues.sort((a, b) => {
+    if (sortBy === 'x' || (sortBy === 'none' && isMappingTimeField)) {
+      xKeys.sort((a, b) => {
+        if (isMappingTimeField) {
+          return new Date(a).getTime() - new Date(b).getTime();
+        }
         const dateA = parseTimestamp(a);
         const dateB = parseTimestamp(b);
         if (dateA && dateB) return dateA.getTime() - dateB.getTime();
@@ -356,7 +429,7 @@ const App = () => {
     }
     if (sortBy === 'value-desc') {
       const totals = new Map<string, number>();
-      xValues.forEach((x) => {
+      xKeys.forEach((x) => {
         let total = 0;
         buckets.forEach((group) => {
           const bucket = group.get(x);
@@ -365,12 +438,16 @@ const App = () => {
         });
         totals.set(x, total);
       });
-      xValues.sort((a, b) => (totals.get(b) ?? 0) - (totals.get(a) ?? 0));
+      xKeys.sort((a, b) => (totals.get(b) ?? 0) - (totals.get(a) ?? 0));
     }
+
+    const xValues = isMappingTimeField
+      ? xKeys.map((key) => new Date(key))
+      : xKeys;
 
     const series = Array.from(buckets.entries()).map(([name, group]) => ({
       name,
-      values: xValues.map((x) => {
+      values: xKeys.map((x) => {
         const bucket = group.get(x);
         if (!bucket) return 0;
         const value =
@@ -381,8 +458,20 @@ const App = () => {
       }),
     }));
 
+    if (dataMapping.valueMode === 'percent') {
+      const totals = xKeys.map((x, index) =>
+        series.reduce((sum, entry) => sum + (entry.values[index] ?? 0), 0)
+      );
+      series.forEach((entry) => {
+        entry.values = entry.values.map((value, index) => {
+          const total = totals[index] || 0;
+          return total === 0 ? 0 : (value / total) * 100;
+        });
+      });
+    }
+
     return { xValues, series };
-  }, [dataMapping, isMappingActive, mappedRows]);
+  }, [dataMapping, isMappingActive, isMappingTimeField, mappedRows]);
 
   const pieAggregation = useMemo(() => {
     if (!isMappingActive || chartConfig.type !== 'pie') {
@@ -390,8 +479,13 @@ const App = () => {
     }
     const buckets = new Map<string, { values: number[]; count: number; last: number | null }>();
     mappedRows.forEach((row) => {
-      const label = String(row[dataMapping.xField] ?? '');
+      let label = String(row[dataMapping.xField] ?? '');
       if (!label) return;
+      if (isMappingTimeField) {
+        const timestamp = parseTimestamp(row[dataMapping.xField]);
+        if (!timestamp) return;
+        label = getTimeBucketStart(timestamp, dataMapping.timeGranularity).toISOString();
+      }
       const value = Number(row[dataMapping.yField]);
       if (Number.isNaN(value) && dataMapping.aggregation !== 'count') return;
       const bucket = buckets.get(label) ?? { values: [], count: 0, last: null };
@@ -423,14 +517,14 @@ const App = () => {
       labels: entries.map((entry) => entry.label),
       values: entries.map((entry) => entry.value),
     };
-  }, [chartConfig.type, dataMapping, isMappingActive, mappedRows]);
+  }, [chartConfig.type, dataMapping, isMappingActive, isMappingTimeField, mappedRows]);
 
   useEffect(() => {
     if (!plotRef.current) return;
     const visibleKeys = seriesKeys.filter((key) => visibleSeries[key]);
     const isTreemap = chartConfig.type === 'treemap';
     const isPie = chartConfig.type === 'pie';
-    const showRangeSlider = !isTreemap && !isPie && !isMappingActive;
+    const showRangeSlider = isMappingTimeField || (!isTreemap && !isPie && !isMappingActive);
 
     const traces: Plotly.Data[] = [];
 
@@ -507,14 +601,17 @@ const App = () => {
         }
 
         if (chartConfig.type === 'area') {
+          const shouldStack =
+            chartConfig.area.stacked ||
+            (dataMapping.valueMode === 'percent' && dataMapping.stackTo100);
           traces.push({
             ...baseTrace,
             type: 'scatter',
             mode: 'lines',
             x: xValues,
             y: yValues,
-            fill: chartConfig.area.stacked && index > 0 ? 'tonexty' : 'tozeroy',
-            stackgroup: chartConfig.area.stacked ? 'stack' : undefined,
+            fill: shouldStack && index > 0 ? 'tonexty' : 'tozeroy',
+            stackgroup: shouldStack ? 'stack' : undefined,
             line: {
               color: seriesColorPalette[index % seriesColorPalette.length],
             },
@@ -624,20 +721,30 @@ const App = () => {
       font: { color: text },
       title: { text: resolvedTitle, font: { color: text } },
       margin: { l: 50, r: 30, t: 50, b: 50 },
-      barmode: chartConfig.type === 'bar' ? chartConfig.bar.mode : undefined,
+      barmode:
+        chartConfig.type === 'bar'
+          ? dataMapping.valueMode === 'percent' && dataMapping.stackTo100
+            ? 'stack'
+            : chartConfig.bar.mode
+          : undefined,
       xaxis: {
         title: { text: resolvedXLabel },
         rangeslider: { visible: showRangeSlider },
         range:
-          !isMappingActive && timeRange
+          (isMappingTimeField || !isMappingActive) && timeRange
             ? [new Date(timeRange[0]), new Date(timeRange[1])]
             : undefined,
+        type: isMappingTimeField ? 'date' : undefined,
         color: text,
         gridcolor: grid,
         zerolinecolor: grid,
       },
       yaxis: {
         title: { text: resolvedYLabel },
+        range:
+          dataMapping.valueMode === 'percent' && isMappingActive ? [0, 100] : undefined,
+        ticksuffix:
+          dataMapping.valueMode === 'percent' && isMappingActive ? '%' : undefined,
         color: text,
         gridcolor: grid,
         zerolinecolor: grid,
@@ -694,6 +801,29 @@ const App = () => {
     visibleSeries,
     watermark,
   ]);
+
+  useEffect(() => {
+    const plotElement = plotRef.current as Plotly.PlotlyHTMLElement | null;
+    if (!plotElement) return;
+    const isTimeAxisActive = isMappingTimeField || (!isMappingActive && normalization.timeField);
+    if (!isTimeAxisActive) return;
+    const handleRelayout = (event: Record<string, unknown>) => {
+      const rangeArray = event['xaxis.range'];
+      const rangeStart =
+        event['xaxis.range[0]'] ?? (Array.isArray(rangeArray) ? rangeArray[0] : undefined);
+      const rangeEnd =
+        event['xaxis.range[1]'] ?? (Array.isArray(rangeArray) ? rangeArray[1] : undefined);
+      if (!rangeStart || !rangeEnd) return;
+      const start = parseTimestamp(rangeStart)?.getTime();
+      const end = parseTimestamp(rangeEnd)?.getTime();
+      if (!start || !end) return;
+      setTimeRange([start, end]);
+    };
+    plotElement.on?.('plotly_relayout', handleRelayout);
+    return () => {
+      plotElement.removeListener?.('plotly_relayout', handleRelayout);
+    };
+  }, [isMappingActive, isMappingTimeField, normalization.timeField]);
 
   const persistActiveSourceConfig = (updates: Record<string, unknown>) => {
     if (!activeSource) return;
@@ -1341,7 +1471,8 @@ const App = () => {
               <div>
                 <h2 className="text-lg font-semibold">Chart</h2>
                 <p className="text-xs text-slate-500">
-                  {stats.rowCount} rows • {formatDate(stats.start)} → {formatDate(stats.end)}
+                  {activeStats.rowCount} rows • {formatDate(activeStats.start)} →{' '}
+                  {formatDate(activeStats.end)}
                 </p>
               </div>
               <div className="flex gap-2">
@@ -1388,8 +1519,8 @@ const App = () => {
                 <div className="mt-2 space-y-2 text-xs">
                   <input
                     type="range"
-                    min={stats.start?.getTime() ?? 0}
-                    max={stats.end?.getTime() ?? 0}
+                    min={activeStats.start?.getTime() ?? 0}
+                    max={activeStats.end?.getTime() ?? 0}
                     value={timeRange[0]}
                     onChange={(event) =>
                       setTimeRange((current) => {
@@ -1403,8 +1534,8 @@ const App = () => {
                   />
                   <input
                     type="range"
-                    min={stats.start?.getTime() ?? 0}
-                    max={stats.end?.getTime() ?? 0}
+                    min={activeStats.start?.getTime() ?? 0}
+                    max={activeStats.end?.getTime() ?? 0}
                     value={timeRange[1]}
                     onChange={(event) =>
                       setTimeRange((current) => {
@@ -1471,6 +1602,50 @@ const App = () => {
                     </option>
                   ))}
                 </select>
+                {dataMapping.xField && isTimeField(dataMapping.xField) && (
+                  <>
+                    <label className="block">Time Granularity</label>
+                    <select
+                      className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                      value={dataMapping.timeGranularity}
+                      onChange={(event) =>
+                        handleMappingChange({
+                          timeGranularity: event.target.value as DataMapping['timeGranularity'],
+                        })
+                      }
+                    >
+                      <option value="day">Day</option>
+                      <option value="week">Week (ISO)</option>
+                      <option value="month">Month</option>
+                    </select>
+                  </>
+                )}
+                <label className="block">Value Mode</label>
+                <select
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  value={dataMapping.valueMode}
+                  onChange={(event) =>
+                    handleMappingChange({
+                      valueMode: event.target.value as DataMapping['valueMode'],
+                    })
+                  }
+                >
+                  <option value="absolute">Absolute</option>
+                  <option value="percent">Percent of total</option>
+                </select>
+                {dataMapping.valueMode === 'percent' &&
+                  (chartConfig.type === 'bar' || chartConfig.type === 'area') && (
+                    <label className="flex items-center gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={dataMapping.stackTo100}
+                        onChange={(event) =>
+                          handleMappingChange({ stackTo100: event.target.checked })
+                        }
+                      />
+                      Stack to 100%
+                    </label>
+                  )}
                 <label className="block">Aggregation</label>
                 <select
                   className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
