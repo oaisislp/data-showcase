@@ -37,8 +37,9 @@ Use **HTTP API Adapter** for JSON responses. Provide a JSONPath expression to ma
 - **Chart title / axis labels** can be customized in **Chart Settings** and are saved per source.
 - **Chart type** supports line, area, bar, scatter, treemap, and pie with type-specific style controls.
 - **Data Mapping** lets you map X/Label, Y/Value, and Group fields with aggregation, sorting, Top N, filtering, time granularity (day/week/month), and percent-of-total mode.
-- **Fonts** can be customized with presets and fine-grained font families/sizes for title, axes, and legend.
-- Long labels are truncated with hover tooltips, optional auto-rotation, and additional chart margins to prevent clipping.
+- **Beautify (Recommended)** applies smart spacing, label handling, and pie Top-N defaults for cleaner charts.
+- **Fonts** use presets (Auto/Chinese/English) and a size dropdown for consistent typography.
+- Long labels are truncated with hover tooltips and optional auto-rotation to prevent clipping.
 - **Watermark** images are rendered into the Plotly chart and included in PNG exports.
 - **Export PNG** hides the time range slider before rendering the image.
 - **Download CSV** outputs only the filtered time range and visible series.

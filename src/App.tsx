@@ -43,15 +43,9 @@ const defaultChartLabels: ChartLabels = {
 
 const defaultChartConfig: ChartConfig = {
   type: 'line',
-  fontFamily:
-    '"Inter","Noto Sans SC","PingFang SC","Microsoft YaHei","Source Han Sans SC",Arial,sans-serif',
   fontSize: 12,
-  titleFontFamily: '',
-  titleFontSize: 18,
-  axisFontFamily: '',
-  axisFontSize: 12,
-  legendFontFamily: '',
-  legendFontSize: 12,
+  fontPreset: 'auto',
+  beautify: true,
   labelMaxLength: 16,
   autoRotateLabels: true,
   labelRotation: 45,
@@ -139,10 +133,10 @@ const WatermarkPositions = {
   'bottom-right': { x: 0.9, y: 0.1 },
 };
 
-const fontPresets = {
-  Small: { fontSize: 11, titleFontSize: 16, axisFontSize: 11, legendFontSize: 11 },
-  Normal: { fontSize: 12, titleFontSize: 18, axisFontSize: 12, legendFontSize: 12 },
-  Large: { fontSize: 14, titleFontSize: 22, axisFontSize: 14, legendFontSize: 14 },
+const fontStacks = {
+  auto: '"Inter","Noto Sans SC","PingFang SC","Microsoft YaHei",Arial,sans-serif',
+  chinese: '"Noto Sans SC","PingFang SC","Microsoft YaHei",Arial,sans-serif',
+  english: '"Inter",Arial,sans-serif',
 };
 
 const getStoredTheme = () => {
@@ -165,6 +159,14 @@ const getStoredDuneKey = (queryId: string) =>
 
 const removeStoredDuneKey = (queryId: string) =>
   localStorage.removeItem(`${DUNE_KEY_PREFIX}:${queryId}`);
+
+const mapLegacyFontPreset = (legacyFont?: string) => {
+  if (!legacyFont) return 'auto';
+  if (legacyFont.includes('Noto Sans SC') || legacyFont.includes('PingFang')) {
+    return legacyFont.includes('Inter') ? 'auto' : 'chinese';
+  }
+  return legacyFont.includes('Inter') ? 'english' : 'auto';
+};
 
 const App = () => {
   const [sources, setSources] = useState<DataSource[]>(() => loadSources());
@@ -278,22 +280,25 @@ const App = () => {
 
 
   const formattedTitle = useMemo(() => {
+    if (!chartConfig.beautify) return resolvedTitle;
     const wrapped = wrapText(resolvedTitle, chartConfig.labelMaxLength);
     const truncated = truncateText(resolvedTitle, chartConfig.labelMaxLength);
     return `<span title="${resolvedTitle}">${wrapped !== resolvedTitle ? wrapped : truncated}</span>`;
-  }, [chartConfig.labelMaxLength, resolvedTitle]);
+  }, [chartConfig.beautify, chartConfig.labelMaxLength, resolvedTitle]);
 
   const formattedXAxisTitle = useMemo(() => {
+    if (!chartConfig.beautify) return resolvedXLabel;
     const wrapped = wrapText(resolvedXLabel, chartConfig.labelMaxLength);
     const truncated = truncateText(resolvedXLabel, chartConfig.labelMaxLength);
     return `<span title="${resolvedXLabel}">${wrapped !== resolvedXLabel ? wrapped : truncated}</span>`;
-  }, [chartConfig.labelMaxLength, resolvedXLabel]);
+  }, [chartConfig.beautify, chartConfig.labelMaxLength, resolvedXLabel]);
 
   const formattedYAxisTitle = useMemo(() => {
+    if (!chartConfig.beautify) return resolvedYLabel;
     const wrapped = wrapText(resolvedYLabel, chartConfig.labelMaxLength);
     const truncated = truncateText(resolvedYLabel, chartConfig.labelMaxLength);
     return `<span title="${resolvedYLabel}">${wrapped !== resolvedYLabel ? wrapped : truncated}</span>`;
-  }, [chartConfig.labelMaxLength, resolvedYLabel]);
+  }, [chartConfig.beautify, chartConfig.labelMaxLength, resolvedYLabel]);
 
   const numericColumns = useMemo(() => getNumericColumns(rawRows), [rawRows]);
   const columns = rawRows.length ? Object.keys(rawRows[0]) : [];
@@ -370,7 +375,17 @@ const App = () => {
       });
     }
     if (config.chartLabels) setChartLabels(config.chartLabels as ChartLabels);
-    if (config.chartConfig) setChartConfig(config.chartConfig as ChartConfig);
+    if (config.chartConfig) {
+      const stored = config.chartConfig as Partial<ChartConfig> & { fontFamily?: string };
+      const merged = { ...defaultChartConfig, ...stored };
+      if (!('fontPreset' in stored)) {
+        merged.fontPreset = mapLegacyFontPreset(stored.fontFamily);
+      }
+      if (!('beautify' in stored)) {
+        merged.beautify = true;
+      }
+      setChartConfig(merged);
+    }
   }, [activeSource]);
 
   useEffect(() => {
@@ -383,6 +398,19 @@ const App = () => {
     setDataMapping(updated);
     persistActiveSourceConfig({ dataMapping: updated });
   }, [chartConfig.type, columns, dataMapping, numericColumns]);
+
+  useEffect(() => {
+    if (chartConfig.type !== 'pie') return;
+    if (!chartConfig.beautify) return;
+    if (dataMapping.pieTopNEnabled === false) return;
+    if (dataMapping.topN > 0) {
+      if (dataMapping.pieTopNEnabled !== true) {
+        handleMappingChange({ pieTopNEnabled: true });
+      }
+      return;
+    }
+    handleMappingChange({ topN: 8, pieTopNEnabled: true });
+  }, [chartConfig.beautify, chartConfig.type, dataMapping.pieTopNEnabled, dataMapping.topN]);
 
   useEffect(() => {
     if (duneConfig.rememberKey && duneConfig.queryId && duneConfig.apiKey) {
@@ -580,9 +608,11 @@ const App = () => {
           : aggregateValues(bucket.values, dataMapping.aggregation, bucket.count),
     }));
     entries.sort((a, b) => b.value - a.value);
-    if (dataMapping.topN > 0 && entries.length > dataMapping.topN) {
-      const kept = entries.slice(0, dataMapping.topN);
-      const rest = entries.slice(dataMapping.topN);
+    const topN =
+      dataMapping.pieTopNEnabled === false ? 0 : Math.max(0, dataMapping.topN);
+    if (topN > 0 && entries.length > topN) {
+      const kept = entries.slice(0, topN);
+      const rest = entries.slice(topN);
       const otherValue = rest.reduce((sum, entry) => sum + entry.value, 0);
       return {
         labels: [...kept.map((entry) => entry.label), dataMapping.otherLabel || 'Other'],
@@ -604,14 +634,26 @@ const App = () => {
 
     const traces: Plotly.Data[] = [];
 
+    const buildPieTrace = () => {
+      const data = pieAggregation.labels.map((label, index) => ({
+        name: label,
+        value: pieAggregation.values[index] ?? 0,
+      }));
+      return {
+        trace: {
+          type: 'pie' as const,
+          labels: data.map((entry) => entry.name),
+          values: data.map((entry) => entry.value),
+          hole: chartConfig.pie.hole,
+        },
+        sample: data.slice(0, 3),
+      };
+    };
+
     if (isPie) {
       if (dataMapping.xField && dataMapping.yField) {
-        traces.push({
-          type: 'pie',
-          labels: pieAggregation.labels,
-          values: pieAggregation.values,
-          hole: chartConfig.pie.hole,
-        });
+        const { trace } = buildPieTrace();
+        traces.push(trace);
       }
     } else if (isTreemap) {
       const { labelField, valueField, groupField } = chartConfig.treemap;
@@ -789,13 +831,15 @@ const App = () => {
     const surface = theme === 'dark' ? '#0f172a' : '#ffffff';
     const text = theme === 'dark' ? '#e2e8f0' : '#0f172a';
     const grid = theme === 'dark' ? '#1e293b' : '#e2e8f0';
-    const baseFontFamily = chartConfig.fontFamily;
-    const titleFontFamily = chartConfig.titleFontFamily || baseFontFamily;
-    const axisFontFamily = chartConfig.axisFontFamily || baseFontFamily;
-    const legendFontFamily = chartConfig.legendFontFamily || baseFontFamily;
+    const baseFontFamily = fontStacks[chartConfig.fontPreset];
+    const baseFontSize = chartConfig.fontSize;
+    const axisFontSize = Math.max(10, baseFontSize - 1);
+    const titleFontSize = baseFontSize + 4;
+    const legendFontSize =
+      chartConfig.beautify && seriesKeys.length > 5 ? Math.max(10, baseFontSize - 1) : baseFontSize;
 
     const xTickConfig =
-      !isMappingTimeField && isMappingActive
+      chartConfig.beautify && !isMappingTimeField && isMappingActive
         ? {
             tickmode: 'array' as const,
             tickvals: mappingAggregation.xValues,
@@ -807,24 +851,33 @@ const App = () => {
           }
         : {};
     const shouldRotate =
+      chartConfig.beautify &&
       chartConfig.autoRotateLabels &&
       !isMappingTimeField &&
       isMappingActive &&
       mappingAggregation.xValues.some(
         (value) => String(value).length > chartConfig.labelMaxLength
       );
+    const beautifyMargin = chartConfig.beautify
+      ? { l: 70, r: 40, t: 80, b: 90 }
+      : { l: 50, r: 30, t: 50, b: 60 };
 
     const layout: Partial<Plotly.Layout> = {
       autosize: true,
       paper_bgcolor: surface,
       plot_bgcolor: surface,
-      font: { color: text, family: baseFontFamily, size: chartConfig.fontSize },
+      font: { color: text, family: baseFontFamily, size: baseFontSize },
       title: {
         text: formattedTitle,
-        font: { color: text, family: titleFontFamily, size: chartConfig.titleFontSize },
-        automargin: true,
+        font: { color: text, family: baseFontFamily, size: titleFontSize },
+        automargin: chartConfig.beautify,
+        x: 0.5,
+        xanchor: 'center',
+        y: 0.98,
+        yanchor: 'top',
+        pad: { t: 8, b: 16 },
       },
-      margin: { l: 60, r: 30, t: 70, b: 70 },
+      margin: beautifyMargin,
       barmode:
         chartConfig.type === 'bar'
           ? dataMapping.valueMode === 'percent' && dataMapping.stackTo100
@@ -834,8 +887,8 @@ const App = () => {
       xaxis: {
         title: {
           text: formattedXAxisTitle,
-          font: { family: axisFontFamily, size: chartConfig.axisFontSize },
-          standoff: 10,
+          font: { family: baseFontFamily, size: axisFontSize },
+          standoff: chartConfig.beautify ? 12 : 6,
         },
         rangeslider: { visible: showRangeSlider },
         range:
@@ -843,9 +896,9 @@ const App = () => {
             ? [new Date(timeRange[0]), new Date(timeRange[1])]
             : undefined,
         type: isMappingTimeField ? 'date' : undefined,
-        tickfont: { family: axisFontFamily, size: chartConfig.axisFontSize },
+        tickfont: { family: baseFontFamily, size: axisFontSize },
         tickangle: shouldRotate ? chartConfig.labelRotation : 0,
-        automargin: true,
+        automargin: chartConfig.beautify,
         color: text,
         gridcolor: grid,
         zerolinecolor: grid,
@@ -854,20 +907,26 @@ const App = () => {
       yaxis: {
         title: {
           text: formattedYAxisTitle,
-          font: { family: axisFontFamily, size: chartConfig.axisFontSize },
-          standoff: 10,
+          font: { family: baseFontFamily, size: axisFontSize },
+          standoff: chartConfig.beautify ? 12 : 6,
         },
         range:
           dataMapping.valueMode === 'percent' && isMappingActive ? [0, 100] : undefined,
         ticksuffix:
           dataMapping.valueMode === 'percent' && isMappingActive ? '%' : undefined,
-        tickfont: { family: axisFontFamily, size: chartConfig.axisFontSize },
-        automargin: true,
+        tickfont: { family: baseFontFamily, size: axisFontSize },
+        automargin: chartConfig.beautify,
         color: text,
         gridcolor: grid,
         zerolinecolor: grid,
       },
-      legend: { font: { family: legendFontFamily, size: chartConfig.legendFontSize } },
+      legend: {
+        font: { family: baseFontFamily, size: legendFontSize },
+        orientation: chartConfig.beautify ? 'h' : 'v',
+        y: chartConfig.beautify ? -0.2 : 1,
+        x: chartConfig.beautify ? 0.5 : 1,
+        xanchor: chartConfig.beautify ? 'center' : 'right',
+      },
       images: watermark.src
         ? [
             {
@@ -890,6 +949,19 @@ const App = () => {
     if (isTreemap || isPie) {
       layout.xaxis = undefined;
       layout.yaxis = undefined;
+    }
+
+    const debugChart = import.meta.env.DEV && localStorage.getItem('debugChart') === 'true';
+    if (debugChart) {
+      const pieDetails =
+        chartConfig.type === 'pie' && dataMapping.xField && dataMapping.yField
+          ? buildPieTrace()
+          : null;
+      console.info('chart render', {
+        chartType: chartConfig.type,
+        firstTraceType: traces[0]?.type,
+        pieSample: pieDetails?.sample,
+      });
     }
 
     try {
@@ -1248,12 +1320,6 @@ const App = () => {
     persistActiveSourceConfig({ chartConfig: updated });
   };
 
-  const applyFontPreset = (preset: keyof typeof fontPresets) => {
-    const presetValues = fontPresets[preset];
-    const updated = { ...chartConfig, ...presetValues };
-    setChartConfig(updated);
-    persistActiveSourceConfig({ chartConfig: updated });
-  };
 
   const handleMappingChange = (updates: Partial<DataMapping>) => {
     const updated = { ...dataMapping, ...updates };
@@ -1770,77 +1836,19 @@ const App = () => {
                       Stack to 100%
                     </label>
                   )}
-                <label className="block">Aggregation</label>
-                <select
-                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-                  value={dataMapping.aggregation}
-                  onChange={(event) =>
-                    handleMappingChange({
-                      aggregation: event.target.value as DataMapping['aggregation'],
-                    })
-                  }
-                >
-                  {['sum', 'avg', 'min', 'max', 'count', 'last'].map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block">Sort</label>
-                    <select
-                      className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-                      value={dataMapping.sortBy}
-                      onChange={(event) =>
-                        handleMappingChange({
-                          sortBy: event.target.value as DataMapping['sortBy'],
-                        })
-                      }
-                    >
-                      <option value="none">None</option>
-                      <option value="x">X</option>
-                      <option value="value-desc">Value desc</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block">Top N (pie)</label>
+                    <label className="block">Pie: Show Top N slices (0 = off)</label>
                     <input
                       className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
                       type="number"
                       min={0}
                       value={dataMapping.topN}
                       onChange={(event) =>
-                        handleMappingChange({ topN: Number(event.target.value) })
-                      }
-                    />
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block">Filter field</label>
-                    <select
-                      className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-                      value={dataMapping.filterField}
-                      onChange={(event) =>
-                        handleMappingChange({ filterField: event.target.value })
-                      }
-                    >
-                      <option value="">None</option>
-                      {columns.map((col) => (
-                        <option key={col} value={col}>
-                          {col}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block">Filter value</label>
-                    <input
-                      className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-                      value={dataMapping.filterValue}
-                      onChange={(event) =>
-                        handleMappingChange({ filterValue: event.target.value })
+                        handleMappingChange({
+                          topN: Number(event.target.value),
+                          pieTopNEnabled: Number(event.target.value) > 0,
+                        })
                       }
                     />
                   </div>
@@ -1857,105 +1865,121 @@ const App = () => {
                     />
                   </div>
                 )}
+                <details className="rounded-md border border-slate-200 px-2 py-2 text-xs dark:border-slate-700">
+                  <summary className="cursor-pointer font-semibold">Advanced</summary>
+                  <div className="mt-2 space-y-2">
+                    <label className="block">Aggregation</label>
+                    <select
+                      className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                      value={dataMapping.aggregation}
+                      onChange={(event) =>
+                        handleMappingChange({
+                          aggregation: event.target.value as DataMapping['aggregation'],
+                        })
+                      }
+                    >
+                      {['sum', 'avg', 'min', 'max', 'count', 'last'].map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
+                    <label className="block">Sort</label>
+                    <select
+                      className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                      value={dataMapping.sortBy}
+                      onChange={(event) =>
+                        handleMappingChange({
+                          sortBy: event.target.value as DataMapping['sortBy'],
+                        })
+                      }
+                    >
+                      <option value="none">None</option>
+                      <option value="x">X</option>
+                      <option value="value-desc">Value desc</option>
+                    </select>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block">Filter field</label>
+                        <select
+                          className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                          value={dataMapping.filterField}
+                          onChange={(event) =>
+                            handleMappingChange({ filterField: event.target.value })
+                          }
+                        >
+                          <option value="">None</option>
+                          {columns.map((col) => (
+                            <option key={col} value={col}>
+                              {col}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block">Filter value</label>
+                        <input
+                          className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                          value={dataMapping.filterValue}
+                          onChange={(event) =>
+                            handleMappingChange({ filterValue: event.target.value })
+                          }
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </details>
               </div>
             </div>
 
             <div className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-700">
               <h3 className="text-sm font-semibold">Chart Settings</h3>
               <div className="mt-2 space-y-2 text-xs">
-                <label className="block text-xs font-semibold">Font Preset</label>
-                <div className="flex gap-2">
-                  {(['Small', 'Normal', 'Large'] as const).map((preset) => (
-                    <button
-                      key={preset}
-                      className="rounded-md border border-slate-200 px-2 py-1 text-xs dark:border-slate-700"
-                      onClick={() => applyFontPreset(preset)}
-                    >
-                      {preset}
-                    </button>
-                  ))}
-                </div>
-                <label className="block">Base font family</label>
-                <input
+                <label className="flex items-center gap-2 text-xs font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={chartConfig.beautify}
+                    onChange={(event) =>
+                      handleChartConfigChange({ beautify: event.target.checked })
+                    }
+                  />
+                  Beautify (Recommended)
+                </label>
+                <label className="block">Font preset</label>
+                <select
                   className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-                  value={chartConfig.fontFamily}
+                  value={chartConfig.fontPreset}
                   onChange={(event) =>
-                    handleChartConfigChange({ fontFamily: event.target.value })
+                    handleChartConfigChange({
+                      fontPreset: event.target.value as ChartConfig['fontPreset'],
+                    })
                   }
-                />
-                <label className="block">Base font size</label>
-                <input
+                >
+                  <option value="auto">Auto (CN + EN)</option>
+                  <option value="chinese">Chinese</option>
+                  <option value="english">English</option>
+                </select>
+                <label className="block">Font size</label>
+                <select
                   className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-                  type="number"
-                  min={8}
                   value={chartConfig.fontSize}
                   onChange={(event) =>
                     handleChartConfigChange({ fontSize: Number(event.target.value) })
                   }
-                />
-                <label className="block">Title font family</label>
-                <input
-                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-                  placeholder="Inherit"
-                  value={chartConfig.titleFontFamily}
-                  onChange={(event) =>
-                    handleChartConfigChange({ titleFontFamily: event.target.value })
-                  }
-                />
-                <label className="block">Title font size</label>
-                <input
-                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-                  type="number"
-                  min={10}
-                  value={chartConfig.titleFontSize}
-                  onChange={(event) =>
-                    handleChartConfigChange({ titleFontSize: Number(event.target.value) })
-                  }
-                />
-                <label className="block">Axis font family</label>
-                <input
-                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-                  placeholder="Inherit"
-                  value={chartConfig.axisFontFamily}
-                  onChange={(event) =>
-                    handleChartConfigChange({ axisFontFamily: event.target.value })
-                  }
-                />
-                <label className="block">Axis font size</label>
-                <input
-                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-                  type="number"
-                  min={8}
-                  value={chartConfig.axisFontSize}
-                  onChange={(event) =>
-                    handleChartConfigChange({ axisFontSize: Number(event.target.value) })
-                  }
-                />
-                <label className="block">Legend font family</label>
-                <input
-                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-                  placeholder="Inherit"
-                  value={chartConfig.legendFontFamily}
-                  onChange={(event) =>
-                    handleChartConfigChange({ legendFontFamily: event.target.value })
-                  }
-                />
-                <label className="block">Legend font size</label>
-                <input
-                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-                  type="number"
-                  min={8}
-                  value={chartConfig.legendFontSize}
-                  onChange={(event) =>
-                    handleChartConfigChange({ legendFontSize: Number(event.target.value) })
-                  }
-                />
+                >
+                  {[10, 11, 12, 14, 16].map((size) => (
+                    <option key={size} value={size}>
+                      {size}
+                    </option>
+                  ))}
+                </select>
                 <label className="block">Label max length</label>
                 <input
                   className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
                   type="number"
                   min={6}
                   value={chartConfig.labelMaxLength}
+                  disabled={!chartConfig.beautify}
                   onChange={(event) =>
                     handleChartConfigChange({ labelMaxLength: Number(event.target.value) })
                   }
@@ -1964,6 +1988,7 @@ const App = () => {
                   <input
                     type="checkbox"
                     checked={chartConfig.autoRotateLabels}
+                    disabled={!chartConfig.beautify}
                     onChange={(event) =>
                       handleChartConfigChange({ autoRotateLabels: event.target.checked })
                     }
@@ -1974,6 +1999,7 @@ const App = () => {
                 <select
                   className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
                   value={chartConfig.labelRotation}
+                  disabled={!chartConfig.beautify || !chartConfig.autoRotateLabels}
                   onChange={(event) =>
                     handleChartConfigChange({ labelRotation: Number(event.target.value) })
                   }

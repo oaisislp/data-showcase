@@ -44,14 +44,9 @@ export interface ChartLabels {
 
 export interface ChartConfig {
   type: ChartType;
-  fontFamily: string;
   fontSize: number;
-  titleFontFamily: string;
-  titleFontSize: number;
-  axisFontFamily: string;
-  axisFontSize: number;
-  legendFontFamily: string;
-  legendFontSize: number;
+  fontPreset: 'auto' | 'chinese' | 'english';
+  beautify: boolean;
   labelMaxLength: number;
   autoRotateLabels: boolean;
   labelRotation: number;
@@ -93,6 +88,7 @@ export interface DataMapping {
   stackTo100: boolean;
   sortBy: 'none' | 'x' | 'value-desc';
   topN: number;
+  pieTopNEnabled?: boolean;
   otherLabel: string;
   filterField: string;
   filterValue: string;
