@@ -175,18 +175,6 @@ const App = () => {
   const activeSource = sources.find((source) => source.id === activeSourceId) ?? null;
 
   const stats = useMemo(() => summaryStats(canonicalRows), [canonicalRows]);
-  const mappingStats = useMemo(() => {
-    if (!isMappingTimeField) return stats;
-    const timestamps = rawRows
-      .map((row) => parseTimestamp(row[dataMapping.xField])?.getTime())
-      .filter((value): value is number => value !== undefined && value !== null);
-    if (!timestamps.length) {
-      return { rowCount: rawRows.length, start: null, end: null };
-    }
-    const min = Math.min(...timestamps);
-    const max = Math.max(...timestamps);
-    return { rowCount: rawRows.length, start: new Date(min), end: new Date(max) };
-  }, [dataMapping.xField, isMappingTimeField, rawRows, stats]);
 
   const seriesKeys = useMemo(() => {
     const keys = new Set<string>();
@@ -220,6 +208,19 @@ const App = () => {
     ['line', 'area', 'bar', 'scatter', 'pie'].includes(chartConfig.type);
 
   const isMappingTimeField = isMappingActive && isTimeField(dataMapping.xField);
+
+  const mappingStats = useMemo(() => {
+    if (!isMappingTimeField) return stats;
+    const timestamps = rawRows
+      .map((row) => parseTimestamp(row[dataMapping.xField])?.getTime())
+      .filter((value): value is number => value !== undefined && value !== null);
+    if (!timestamps.length) {
+      return { rowCount: rawRows.length, start: null, end: null };
+    }
+    const min = Math.min(...timestamps);
+    const max = Math.max(...timestamps);
+    return { rowCount: rawRows.length, start: new Date(min), end: new Date(max) };
+  }, [dataMapping.xField, isMappingTimeField, rawRows, stats]);
 
   const activeStats = isMappingTimeField ? mappingStats : stats;
   const resolvedTitle = chartLabels.title || datasetName || 'Untitled chart';
