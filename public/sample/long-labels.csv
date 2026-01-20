@@ -1,0 +1,7 @@
+category,group,value,date
+"This is a very long category name for analytics",Alpha,120,2024-01-01
+"This is a very long category name for analytics",Beta,80,2024-01-01
+"Another extremely verbose category label for reporting",Alpha,90,2024-01-02
+"Another extremely verbose category label for reporting",Beta,110,2024-01-02
+"A third long label that should truncate properly",Alpha,70,2024-01-03
+"A third long label that should truncate properly",Beta,130,2024-01-03

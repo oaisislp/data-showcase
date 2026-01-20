@@ -44,6 +44,17 @@ export interface ChartLabels {
 
 export interface ChartConfig {
   type: ChartType;
+  fontFamily: string;
+  fontSize: number;
+  titleFontFamily: string;
+  titleFontSize: number;
+  axisFontFamily: string;
+  axisFontSize: number;
+  legendFontFamily: string;
+  legendFontSize: number;
+  labelMaxLength: number;
+  autoRotateLabels: boolean;
+  labelRotation: number;
   line: {
     smooth: boolean;
     markers: boolean;

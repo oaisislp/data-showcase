@@ -37,6 +37,8 @@ Use **HTTP API Adapter** for JSON responses. Provide a JSONPath expression to ma
 - **Chart title / axis labels** can be customized in **Chart Settings** and are saved per source.
 - **Chart type** supports line, area, bar, scatter, treemap, and pie with type-specific style controls.
 - **Data Mapping** lets you map X/Label, Y/Value, and Group fields with aggregation, sorting, Top N, filtering, time granularity (day/week/month), and percent-of-total mode.
+- **Fonts** can be customized with presets and fine-grained font families/sizes for title, axes, and legend.
+- Long labels are truncated with hover tooltips, optional auto-rotation, and additional chart margins to prevent clipping.
 - **Watermark** images are rendered into the Plotly chart and included in PNG exports.
 - **Export PNG** hides the time range slider before rendering the image.
 - **Download CSV** outputs only the filtered time range and visible series.
@@ -45,6 +47,7 @@ Use **HTTP API Adapter** for JSON responses. Provide a JSONPath expression to ma
 
 - Load the sample CSV via **Load sample/sample.csv**.
 - Switch chart types (line, area, bar, scatter, treemap, pie), set Data Mapping fields, and verify time granularity + percent mode.
+- Check long-label handling using `public/sample/long-labels.csv` with Data Mapping.
 - Toggle between light/dark themes (System/Light/Dark).
 - Add a watermark and export PNG (confirm the rangeslider is not visible).
 - Add a Dune CSV source and chart it.

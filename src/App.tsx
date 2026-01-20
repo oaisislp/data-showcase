@@ -43,6 +43,18 @@ const defaultChartLabels: ChartLabels = {
 
 const defaultChartConfig: ChartConfig = {
   type: 'line',
+  fontFamily:
+    '"Inter","Noto Sans SC","PingFang SC","Microsoft YaHei","Source Han Sans SC",Arial,sans-serif',
+  fontSize: 12,
+  titleFontFamily: '',
+  titleFontSize: 18,
+  axisFontFamily: '',
+  axisFontSize: 12,
+  legendFontFamily: '',
+  legendFontSize: 12,
+  labelMaxLength: 16,
+  autoRotateLabels: true,
+  labelRotation: 45,
   line: { smooth: false, markers: true, dash: 'solid' },
   area: { stacked: false, opacity: 0.6 },
   bar: { mode: 'group', orientation: 'v' },
@@ -94,12 +106,43 @@ const formatDate = (value: Date | null) => (value ? value.toISOString() : '--');
 
 const seriesColorPalette = ['#38bdf8', '#f97316', '#10b981', '#a855f7', '#e11d48'];
 
+const truncateText = (value: string, maxLength: number) => {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 1))}…`;
+};
+
+const wrapText = (value: string, maxLength: number) => {
+  if (value.length <= maxLength) return value;
+  const words = value.split(' ');
+  if (words.length === 1) {
+    return `${value.slice(0, maxLength)}<br>${value.slice(maxLength)}`;
+  }
+  const lines: string[] = [];
+  let current = '';
+  words.forEach((word) => {
+    if (`${current} ${word}`.trim().length > maxLength) {
+      if (current) lines.push(current.trim());
+      current = word;
+    } else {
+      current = `${current} ${word}`.trim();
+    }
+  });
+  if (current) lines.push(current.trim());
+  return lines.join('<br>');
+};
+
 const WatermarkPositions = {
   center: { x: 0.5, y: 0.5 },
   'top-left': { x: 0.1, y: 0.9 },
   'top-right': { x: 0.9, y: 0.9 },
   'bottom-left': { x: 0.1, y: 0.1 },
   'bottom-right': { x: 0.9, y: 0.1 },
+};
+
+const fontPresets = {
+  Small: { fontSize: 11, titleFontSize: 16, axisFontSize: 11, legendFontSize: 11 },
+  Normal: { fontSize: 12, titleFontSize: 18, axisFontSize: 12, legendFontSize: 12 },
+  Large: { fontSize: 14, titleFontSize: 22, axisFontSize: 14, legendFontSize: 14 },
 };
 
 const getStoredTheme = () => {
@@ -233,6 +276,29 @@ const App = () => {
     return activeKeys.length === 1 ? activeKeys[0] : 'Value';
   }, [chartLabels.yLabel, dataMapping.yField, isMappingActive, seriesKeys, visibleSeries]);
 
+
+  const formattedTitle = useMemo(() => {
+    const wrapped = wrapText(resolvedTitle, chartConfig.labelMaxLength);
+    const truncated = truncateText(resolvedTitle, chartConfig.labelMaxLength);
+    return `<span title="${resolvedTitle}">${wrapped !== resolvedTitle ? wrapped : truncated}</span>`;
+  }, [chartConfig.labelMaxLength, resolvedTitle]);
+
+  const formattedXAxisTitle = useMemo(() => {
+    const wrapped = wrapText(resolvedXLabel, chartConfig.labelMaxLength);
+    const truncated = truncateText(resolvedXLabel, chartConfig.labelMaxLength);
+    return `<span title="${resolvedXLabel}">${wrapped !== resolvedXLabel ? wrapped : truncated}</span>`;
+  }, [chartConfig.labelMaxLength, resolvedXLabel]);
+
+  const formattedYAxisTitle = useMemo(() => {
+    const wrapped = wrapText(resolvedYLabel, chartConfig.labelMaxLength);
+    const truncated = truncateText(resolvedYLabel, chartConfig.labelMaxLength);
+    return `<span title="${resolvedYLabel}">${wrapped !== resolvedYLabel ? wrapped : truncated}</span>`;
+  }, [chartConfig.labelMaxLength, resolvedYLabel]);
+
+  const numericColumns = useMemo(() => getNumericColumns(rawRows), [rawRows]);
+  const columns = rawRows.length ? Object.keys(rawRows[0]) : [];
+
+
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const updateTheme = () => setTheme(resolveTheme(themeSetting));
@@ -308,6 +374,17 @@ const App = () => {
   }, [activeSource]);
 
   useEffect(() => {
+    if (chartConfig.type !== 'pie') return;
+    if (dataMapping.xField && dataMapping.yField) return;
+    const xField = dataMapping.xField || columns[0] || '';
+    const yField = dataMapping.yField || numericColumns[0] || '';
+    if (!xField || !yField) return;
+    const updated = { ...dataMapping, xField, yField };
+    setDataMapping(updated);
+    persistActiveSourceConfig({ dataMapping: updated });
+  }, [chartConfig.type, columns, dataMapping, numericColumns]);
+
+  useEffect(() => {
     if (duneConfig.rememberKey && duneConfig.queryId && duneConfig.apiKey) {
       localStorage.setItem(`${DUNE_KEY_PREFIX}:${duneConfig.queryId}`, duneConfig.apiKey);
     }
@@ -342,8 +419,6 @@ const App = () => {
     rawRows,
     timeRange,
   ]);
-
-  const numericColumns = useMemo(() => getNumericColumns(rawRows), [rawRows]);
 
   const aggregateValues = (values: number[], method: DataMapping['aggregation'], count: number) => {
     if (!values.length) return method === 'count' ? count : 0;
@@ -714,14 +789,42 @@ const App = () => {
     const surface = theme === 'dark' ? '#0f172a' : '#ffffff';
     const text = theme === 'dark' ? '#e2e8f0' : '#0f172a';
     const grid = theme === 'dark' ? '#1e293b' : '#e2e8f0';
+    const baseFontFamily = chartConfig.fontFamily;
+    const titleFontFamily = chartConfig.titleFontFamily || baseFontFamily;
+    const axisFontFamily = chartConfig.axisFontFamily || baseFontFamily;
+    const legendFontFamily = chartConfig.legendFontFamily || baseFontFamily;
+
+    const xTickConfig =
+      !isMappingTimeField && isMappingActive
+        ? {
+            tickmode: 'array' as const,
+            tickvals: mappingAggregation.xValues,
+            ticktext: mappingAggregation.xValues.map((value) => {
+              const label = String(value);
+              const truncated = truncateText(label, chartConfig.labelMaxLength);
+              return `<span title="${label}">${truncated}</span>`;
+            }),
+          }
+        : {};
+    const shouldRotate =
+      chartConfig.autoRotateLabels &&
+      !isMappingTimeField &&
+      isMappingActive &&
+      mappingAggregation.xValues.some(
+        (value) => String(value).length > chartConfig.labelMaxLength
+      );
 
     const layout: Partial<Plotly.Layout> = {
       autosize: true,
       paper_bgcolor: surface,
       plot_bgcolor: surface,
-      font: { color: text },
-      title: { text: resolvedTitle, font: { color: text } },
-      margin: { l: 50, r: 30, t: 50, b: 50 },
+      font: { color: text, family: baseFontFamily, size: chartConfig.fontSize },
+      title: {
+        text: formattedTitle,
+        font: { color: text, family: titleFontFamily, size: chartConfig.titleFontSize },
+        automargin: true,
+      },
+      margin: { l: 60, r: 30, t: 70, b: 70 },
       barmode:
         chartConfig.type === 'bar'
           ? dataMapping.valueMode === 'percent' && dataMapping.stackTo100
@@ -729,27 +832,42 @@ const App = () => {
             : chartConfig.bar.mode
           : undefined,
       xaxis: {
-        title: { text: resolvedXLabel },
+        title: {
+          text: formattedXAxisTitle,
+          font: { family: axisFontFamily, size: chartConfig.axisFontSize },
+          standoff: 10,
+        },
         rangeslider: { visible: showRangeSlider },
         range:
           (isMappingTimeField || !isMappingActive) && timeRange
             ? [new Date(timeRange[0]), new Date(timeRange[1])]
             : undefined,
         type: isMappingTimeField ? 'date' : undefined,
+        tickfont: { family: axisFontFamily, size: chartConfig.axisFontSize },
+        tickangle: shouldRotate ? chartConfig.labelRotation : 0,
+        automargin: true,
         color: text,
         gridcolor: grid,
         zerolinecolor: grid,
+        ...xTickConfig,
       },
       yaxis: {
-        title: { text: resolvedYLabel },
+        title: {
+          text: formattedYAxisTitle,
+          font: { family: axisFontFamily, size: chartConfig.axisFontSize },
+          standoff: 10,
+        },
         range:
           dataMapping.valueMode === 'percent' && isMappingActive ? [0, 100] : undefined,
         ticksuffix:
           dataMapping.valueMode === 'percent' && isMappingActive ? '%' : undefined,
+        tickfont: { family: axisFontFamily, size: chartConfig.axisFontSize },
+        automargin: true,
         color: text,
         gridcolor: grid,
         zerolinecolor: grid,
       },
+      legend: { font: { family: legendFontFamily, size: chartConfig.legendFontSize } },
       images: watermark.src
         ? [
             {
@@ -1130,6 +1248,13 @@ const App = () => {
     persistActiveSourceConfig({ chartConfig: updated });
   };
 
+  const applyFontPreset = (preset: keyof typeof fontPresets) => {
+    const presetValues = fontPresets[preset];
+    const updated = { ...chartConfig, ...presetValues };
+    setChartConfig(updated);
+    persistActiveSourceConfig({ chartConfig: updated });
+  };
+
   const handleMappingChange = (updates: Partial<DataMapping>) => {
     const updated = { ...dataMapping, ...updates };
     setDataMapping(updated);
@@ -1141,8 +1266,6 @@ const App = () => {
     removeStoredDuneKey(duneConfig.queryId);
     setDuneConfig((prev) => ({ ...prev, apiKey: '' }));
   };
-
-  const columns = rawRows.length ? Object.keys(rawRows[0]) : [];
 
   const treemapAvailable = chartConfig.type === 'treemap';
   const treemapReady =
@@ -1740,6 +1863,127 @@ const App = () => {
             <div className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-700">
               <h3 className="text-sm font-semibold">Chart Settings</h3>
               <div className="mt-2 space-y-2 text-xs">
+                <label className="block text-xs font-semibold">Font Preset</label>
+                <div className="flex gap-2">
+                  {(['Small', 'Normal', 'Large'] as const).map((preset) => (
+                    <button
+                      key={preset}
+                      className="rounded-md border border-slate-200 px-2 py-1 text-xs dark:border-slate-700"
+                      onClick={() => applyFontPreset(preset)}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+                <label className="block">Base font family</label>
+                <input
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  value={chartConfig.fontFamily}
+                  onChange={(event) =>
+                    handleChartConfigChange({ fontFamily: event.target.value })
+                  }
+                />
+                <label className="block">Base font size</label>
+                <input
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  type="number"
+                  min={8}
+                  value={chartConfig.fontSize}
+                  onChange={(event) =>
+                    handleChartConfigChange({ fontSize: Number(event.target.value) })
+                  }
+                />
+                <label className="block">Title font family</label>
+                <input
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  placeholder="Inherit"
+                  value={chartConfig.titleFontFamily}
+                  onChange={(event) =>
+                    handleChartConfigChange({ titleFontFamily: event.target.value })
+                  }
+                />
+                <label className="block">Title font size</label>
+                <input
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  type="number"
+                  min={10}
+                  value={chartConfig.titleFontSize}
+                  onChange={(event) =>
+                    handleChartConfigChange({ titleFontSize: Number(event.target.value) })
+                  }
+                />
+                <label className="block">Axis font family</label>
+                <input
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  placeholder="Inherit"
+                  value={chartConfig.axisFontFamily}
+                  onChange={(event) =>
+                    handleChartConfigChange({ axisFontFamily: event.target.value })
+                  }
+                />
+                <label className="block">Axis font size</label>
+                <input
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  type="number"
+                  min={8}
+                  value={chartConfig.axisFontSize}
+                  onChange={(event) =>
+                    handleChartConfigChange({ axisFontSize: Number(event.target.value) })
+                  }
+                />
+                <label className="block">Legend font family</label>
+                <input
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  placeholder="Inherit"
+                  value={chartConfig.legendFontFamily}
+                  onChange={(event) =>
+                    handleChartConfigChange({ legendFontFamily: event.target.value })
+                  }
+                />
+                <label className="block">Legend font size</label>
+                <input
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  type="number"
+                  min={8}
+                  value={chartConfig.legendFontSize}
+                  onChange={(event) =>
+                    handleChartConfigChange({ legendFontSize: Number(event.target.value) })
+                  }
+                />
+                <label className="block">Label max length</label>
+                <input
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  type="number"
+                  min={6}
+                  value={chartConfig.labelMaxLength}
+                  onChange={(event) =>
+                    handleChartConfigChange({ labelMaxLength: Number(event.target.value) })
+                  }
+                />
+                <label className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={chartConfig.autoRotateLabels}
+                    onChange={(event) =>
+                      handleChartConfigChange({ autoRotateLabels: event.target.checked })
+                    }
+                  />
+                  Auto-rotate long x labels
+                </label>
+                <label className="block">Label rotation (deg)</label>
+                <select
+                  className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                  value={chartConfig.labelRotation}
+                  onChange={(event) =>
+                    handleChartConfigChange({ labelRotation: Number(event.target.value) })
+                  }
+                >
+                  {[0, 30, 45, 60].map((value) => (
+                    <option key={value} value={value}>
+                      {value}
+                    </option>
+                  ))}
+                </select>
                 <input
                   className="w-full rounded-md border border-slate-200 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
                   placeholder="Chart title"
